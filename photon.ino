@@ -1,141 +1,125 @@
 int LED = D7;
 int doorSensor = D0;
 
-// 0: standby
-// 1: waiting for response
-// 2: waiting for swinging to stop
-int status = 0;
-int stuckThreshold = 5000;
-int stuckCount = 0;
-int sentStuckNotice = false;
+int status = 0;                 // 0:standby, 1:waiting, 2:swinging
+int doorOpen = false;           // true when door is open
+int prevDoorOpen = false;       // for remembering door state
 
-int sendThreshold = 500;
+int openPeriod = 0;             // tracks how long door is open
+int openThreshold = 500;        // helps avoid false positive openings
 
-int swingPeriod = 0;
-int prevSwingPeriod = 0;
+int closedPeriod = 0;           // tracks how long door is closed
+int closedThreshold = 5000;     // helps determine when door is done swinging
 
-int calmPeriod = 0;
-int calmThreshold = 5000;
-
-int doorOpen = false;
-int prevDoorOpen = false;
+int stuckPeriod = 0;            // tracks how long door is stuck open
+int stuckThreshold = 10000;     // how long before considering door is stuck
+int sentStuckNotice = false;    // helps reduce too many notices
 
 void setup(){
-    pinMode(LED, OUTPUT);
-    pinMode(doorSensor, INPUT_PULLUP);
-    Particle.subscribe("hook-response/petDoor", onWebhookResponse, MY_DEVICES);
-    Serial.begin(9600);
+  pinMode(LED, OUTPUT);
+  pinMode(doorSensor, INPUT_PULLUP);
+  Particle.subscribe("hook-response/iotPetDoor", onWebhookResponse, MY_DEVICES);
+  Serial.begin(9600);
 }
 
 void loop(){
-    if(status == 0 || status == 2){
-        onStandby();
-    }
-    else if(status == 1){
-        onPending();
-    }
+  Serial.print(status);
+  Serial.print(" ");
+
+  if(status == 0 || status == 2){
+    onStandby();
+  }
+  else if(status == 1){
+    onPending();
+  }
 }
 
 void onStandby(){
-    // checking the door status advances any timers
-    // that are currently being watched
-    checkDoorStatus();
+  checkDoorStatus();
 
-    // avoids false positives; only when door
-    // is "officially" open, send the message
-    if(status == 1 && swingPeriod >= sendThreshold){
-        sendMessage();
-    }
+  if(status == 0 && openPeriod >= openThreshold){
+    sendMessage();
+  }
 
-    // but if we've been stuck for a while and haven't told anyone,
-    // send that notice out and put back into standby.
-    if(stuckCount == 5 && sentStuckNotice == false){
-        Serial.println("_-_-_-_-_- BROKEN DOOR -_-_-_-_-_");
-        Particle.publish("petDoor", "The door is broken, you geez :/", PRIVATE);
-        sentStuckNotice = true;
-        status = 0;
-    }
+  if(stuckPeriod >= stuckThreshold && sentStuckNotice == false){
+    Serial.println("");
+    Serial.println("_-_-_-_-_- BROKEN DOOR -_-_-_-_-_");
+    Particle.publish("iotPetDoor", "The door is broken, you geez :/", PRIVATE);
+    sentStuckNotice = true;
+  }
+
+  if(status == 2 && closedPeriod >= closedThreshold){
+    status = 0;
+    sentStuckNotice = false;
+  }
+
+  Serial.println("");
 }
 
 void onPending(){
-    digitalWrite(LED, HIGH);
-    delay(20);
-    digitalWrite(LED, LOW);
-    delay(100);
+  digitalWrite(LED, HIGH);
+  delay(20);
+  digitalWrite(LED, LOW);
+  delay(100);
 }
 
 void sendMessage(){
-    Serial.println("Sending Message");
-    Particle.publish("petDoor", "I used my door, you geez :P", PRIVATE);
-    status = 1;
+  Serial.println("");
+  Serial.println("Sending Message");
+  Particle.publish("iotPetDoor", "I used my door, you geez :P", PRIVATE);
+  status = 1;
 }
 
 void onWebhookResponse(const char *event, const char *data) {
-    for(int a = 0; a < 5; a++){
-        digitalWrite(LED, HIGH);
-        delay(1000);
-        digitalWrite(LED, LOW);
-        delay(500);
-    }
+  for(int a = 0; a < 5; a++){
+    digitalWrite(LED, HIGH);
+    delay(500);
     digitalWrite(LED, LOW);
-    status = 2;
+    delay(100);
+  }
+  digitalWrite(LED, LOW);
+  status = 2;
 }
 
 void checkDoorStatus(){
-    doorOpen = digitalRead(doorSensor);
+  doorOpen = digitalRead(doorSensor);
 
-    // when the door changes states (open, closed)
-    if(doorOpen != prevDoorOpen){
-        // remember this new state or this will only happen once
-        prevDoorOpen = doorOpen;
-
-        if(!doorOpen){
-            // we want to remember how long the door has been opened
-            // and reset the counter to prepare for the next swing.
-            // reset stuck counter because door is not open.
-            prevSwingPeriod = swingPeriod;
-            swingPeriod = 0;
-            stuckCount = 0;
-        }
-
-        // when the door closes, we want to time how long
-        // this period of calm lasts so reset the counter.
-        if(doorOpen){
-            calmPeriod = 0;
-        }
+  if(doorOpen == prevDoorOpen){
+    Serial.print("same status ");
+    if(!doorOpen){
+      closedPeriod++;
+      Serial.print("closed (");
+      Serial.print(closedPeriod);
+      Serial.print(") ");
     }
-
-    // when the door is just sitting there
     else {
-        // when closed, track how long it's been closed
-        if(!doorOpen){
-            calmPeriod++;
-        }
+      openPeriod++;
+      Serial.print("open (");
+      Serial.print(openPeriod);
+      Serial.print(") ");
 
-        // when open, track that time too
-        else {
-            swingPeriod++;
-
-            // if the door has been open longer than expected
-            // start to consider that it might be stuck.
-            if(swingPeriod % stuckThreshold == 0){
-                stuckCount++;
-            }
-        }
-
-        // when the door has been closed for a while
-        // reset any counters and put device into standby
-        if(swingPeriod == 0 && calmPeriod >= calmThreshold){
-            prevSwingPeriod = 0;
-            status = 0;
-        }
+      if(openPeriod >= stuckThreshold){
+        stuckPeriod++;
+        Serial.print("stuck (");
+        Serial.print(stuckPeriod);
+        Serial.print(") ");
+      }
     }
+  }
+  else {
+    prevDoorOpen = doorOpen;
+    Serial.print("now ");
+    Serial.print(doorOpen ? "open " : "closed ");
 
-    Serial.print("calm for: ");
-    Serial.print(calmPeriod);
-    Serial.print(" | open for: ");
-    Serial.print(swingPeriod);
-    Serial.print(" | stuck for: ");
-    Serial.println(stuckCount);
-
+    if(!doorOpen){
+      Serial.print("reset open + stuck");
+      openPeriod = 0;
+      stuckPeriod = 0;
+      sentStuckNotice = false;
+    }
+    else {
+      Serial.print("reset closed");
+      closedPeriod = 0;
+    }
+  }
 }
